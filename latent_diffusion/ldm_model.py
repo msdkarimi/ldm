@@ -3,7 +3,7 @@ from torch import nn
 from utils.utils import get_grad_norm, AverageMeter, make_grid, noise_like, compute_grad_param_norms
 from einops import rearrange, repeat
 from tqdm import tqdm
-from utils.lr_sceduler import LambdaLinearScheduler
+import os
 
 
 class LDM(nn.Module):
@@ -36,6 +36,7 @@ class LDM(nn.Module):
         self.loss_meter_val = AverageMeter()
         self.grad_norm_meter = AverageMeter()
         self.param_norm_meter = AverageMeter()
+        self.best = 100
 
 
     def forward(self, x, c=None):
@@ -307,6 +308,10 @@ class LDM(nn.Module):
                         f'{mode}/at step:[{self.step}]\t'
                         f'loss {self.loss_meter_val.val:.5f} ({self.loss_meter_val.avg:.5f})\t'
                     )
+                    if self.best > self.loss_meter_val.avg:
+                        self.best = self.loss_meter_val.avg
+                        os.makedirs('checkpoint', exist_ok=True)
+                        torch.save(self.unet.state_dict(), f'checkpoint/unet_{self.step}.pt')
                 else:
                     raise ValueError
 
