@@ -289,8 +289,8 @@ class LDM(nn.Module):
     def log_model(self, logger, mode, writer=None):
             if writer is not None and mode=='train':
                 writer.add_scalar(f'loss/train', self.loss_meter.val, self.step)
-                writer.add_scalar(f'grad_norm/train', self.loss_meter.val, self.step)
-                writer.add_scalar(f'param_norm/train', self.loss_meter.val, self.step)
+                writer.add_scalar(f'grad_norm/train', self.grad_norm_meter.val, self.step)
+                writer.add_scalar(f'param_norm/train', self.param_norm_meter.val, self.step)
 
             if self.step % self.model_logger_every == 0:
                 if mode == 'train':
