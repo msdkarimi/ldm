@@ -10,7 +10,7 @@ def get_latent_diffusion_config():
     latent_diffusion_configs.use_spatial_transformer = False
     latent_diffusion_configs.model_logger_every = 100
     latent_diffusion_configs.diffusion_logger_every = 50
-    latent_diffusion_configs.lr_anneal_steps = 10
+    latent_diffusion_configs.lr_anneal_steps = 5e5
     return latent_diffusion_configs
 
 

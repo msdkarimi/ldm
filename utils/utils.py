@@ -16,6 +16,16 @@ image_transform = transforms.Compose([
 ])
 
 
+def compute_grad_param_norms(model, grad_scale=1.0):
+    grad_norm = 0.0
+    param_norm = 0.0
+    for p in model.parameters():
+        with torch.no_grad():
+            param_norm += torch.norm(p, p=2, dtype=torch.float32).item() ** 2
+            if p.grad is not None:
+                grad_norm += torch.norm(p.grad, p=2, dtype=torch.float32).item() ** 2
+    return np.sqrt(grad_norm) / grad_scale, np.sqrt(param_norm)
+
 def count_params(model, verbose=False):
     total_params = sum(p.numel() for p in model.parameters())
     if verbose:

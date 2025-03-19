@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from utils.utils import get_grad_norm, AverageMeter, make_grid, noise_like
+from utils.utils import get_grad_norm, AverageMeter, make_grid, noise_like, compute_grad_param_norms
 from einops import rearrange, repeat
 from tqdm import tqdm
 from utils.lr_sceduler import LambdaLinearScheduler
@@ -11,27 +11,49 @@ class LDM(nn.Module):
                  scale_factor=0.18215,
                  model_logger_every=100,
                  diffusion_logger_every=50,
-                 lr_anneal_steps=0,
+                 lr_anneal_steps=5e4,
+                 init_lr=1e-5,
+                 batch_size=64,
                  *,unet:nn.Module, vae:nn.Module, diffusion):
         super().__init__()
         self.vae = vae
         self.diffusion = diffusion
         self.unet = unet
         self.text_encoder = None
-        self.optimizer = torch.optim.Adam(self.unet.parameters(), lr=1e-5)
+        self.lr = batch_size * init_lr
+        # self.lr = init_lr
+        self.optimizer = torch.optim.Adam(self.unet.parameters(), lr=self.lr)
         # self.lr_scheduler = LambdaLinearScheduler(self.optimizer)
         self.use_spatial_transformer = use_spatial_transformer
         self.scale_factor = scale_factor
         self.step = 0
+        self.resume_step = 0
         self.model_logger_every = model_logger_every
         self.diffusion_logger_every = diffusion_logger_every
         self.lr_anneal_steps = lr_anneal_steps
 
         self.loss_meter = AverageMeter()
+        self.loss_meter_val = AverageMeter()
         self.grad_norm_meter = AverageMeter()
+        self.param_norm_meter = AverageMeter()
 
 
     def forward(self, x, c=None):
+        # z = self.get_latent(x)
+        # noise = torch.randn_like(z).to(z.device)
+        # t = torch.randint(0, self.diffusion.num_timesteps, (z.shape[0],), device=z.device).long()
+        # z_noisy = self.diffusion.q_sample(x_start=z, t=t, noise=noise)
+        # if self.use_spatial_transformer:
+        #     assert c is not None, 'text condition can not be empty'
+        #     c = self.get_text_condition(c)
+        #
+        # predicted_noise = self.unet(z_noisy, t, context=c)
+        predicted_noise, target_noise = self._forward_unet(x, c)
+        loss = self.get_loss(target_noise, predicted_noise)
+        self.backprop(loss)
+        self.anneal_lr()
+
+    def _forward_unet(self, x, c=None):
         z = self.get_latent(x)
         noise = torch.randn_like(z).to(z.device)
         t = torch.randint(0, self.diffusion.num_timesteps, (z.shape[0],), device=z.device).long()
@@ -41,21 +63,41 @@ class LDM(nn.Module):
             c = self.get_text_condition(c)
 
         predicted_noise = self.unet(z_noisy, t, context=c)
-        self.backprop(self.get_loss(noise, predicted_noise))
+        return predicted_noise, noise
+
 
     def backprop(self, loss):
         self.loss_meter.update(loss.item())
         self.optimizer.zero_grad()
         loss.backward()
-        grad_norm = get_grad_norm(self.unet.parameters())
+        # grad_norm = get_grad_norm(self.unet.parameters())
+        grad_norm, param_norm = compute_grad_param_norms(self.unet)
         self.grad_norm_meter.update(grad_norm)
+        self.param_norm_meter.update(param_norm)
         self.optimizer.step()
-        # todo add scheduler
         self.step += 1
 
-    def _anneal_lr(self,):
-        pass
+    def anneal_lr(self,):
+        if not self.lr_anneal_steps:
+            return
+        frac_done = (self.step + self.resume_step) / self.lr_anneal_steps
+        lr = self.lr * (1 - frac_done)
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = lr
 
+    def validation(self, dataloader, logger, interval):
+        if self.step % interval == 0:
+            self.unet.eval()
+            self.loss_meter_val.reset()
+            for idx, batch in enumerate(dataloader):
+                x = batch['image'].cuda()
+                c = None # batch['c']
+                predicted_noise, target_noise = self._forward_unet(x, c)
+                loss = self.get_loss(target_noise, predicted_noise)
+                self.loss_meter_val.update(loss.item())
+
+            self.log_model(logger, 'validation')
+            self.unet.train()
 
     def log_image(self, batch,
                   n_row=2, sample=True,
@@ -244,21 +286,29 @@ class LDM(nn.Module):
         return model_mean, posterior_variance, posterior_log_variance, x_recon
 
 
-    def log_model(self, logger, writter=None):
-            if writter is not None:
-                pass
+    def log_model(self, logger, mode, writer=None):
+            if writer is not None and mode=='train':
+                writer.add_scalar(f'loss/train', self.loss_meter.val, self.step)
+                writer.add_scalar(f'grad_norm/train', self.loss_meter.val, self.step)
+                writer.add_scalar(f'param_norm/train', self.loss_meter.val, self.step)
+
             if self.step % self.model_logger_every == 0:
-                lr = self.optimizer.param_groups[0]['lr']
-                memory_used = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
-                logger.info(f'Train/global_step: [{self.step}]\t'
-                f'loss {self.loss_meter.val:.4f} ({self.loss_meter.avg:.4f})\t'
-                f'grad_norm {self.grad_norm_meter.val:.4f} ({self.grad_norm_meter.avg:.4f})\t'
-                f'lr {lr:.6f} \t'
-                f'mem {memory_used:.2f}GB')
-
-
-
-
+                if mode == 'train':
+                    lr = self.optimizer.param_groups[0]['lr']
+                    memory_used = torch.cuda.max_memory_allocated() / (1024.0 ** 3)
+                    logger.info(f'{mode}/global_step:[{self.step}]\t'
+                    f'loss {self.loss_meter.val:.5f} ({self.loss_meter.avg:.5f})\t'
+                    f'grad_norm {self.grad_norm_meter.val:.5f} ({self.grad_norm_meter.avg:.5f})\t'
+                    f'param_norm {self.param_norm_meter.val:.5f} ({self.param_norm_meter.avg:.5f})\t'
+                    f'lr {lr:.9f} \t'
+                    f'mem {memory_used:.2f}GB')
+                elif mode=='validation':
+                    logger.info(
+                        f'{mode}/at step:[{self.step}]\t'
+                        f'loss {self.loss_meter_val.val:.5f} ({self.loss_meter_val.avg:.5f})\t'
+                    )
+                else:
+                    raise ValueError
 
 
 
