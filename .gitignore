@@ -1,0 +1,12 @@
+data/*.txt
+data/*.ttf
+data/*.json
+data/train/*
+data/validation/*
+ldm_logger/
+pretrained/*
+pretrained/clip_model/
+pretrained/vae_f_8.ckpt
+.idea
+*.xml
+*.json
